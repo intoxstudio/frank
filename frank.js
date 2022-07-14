@@ -15,8 +15,7 @@ const outputFolder = "output"
 const outputFile = "ranks.csv"
 const pipeline = util.promisify(stream.pipeline)
 
-
-const get_web_ranks_for_all_installs = async (pluginId, existingDomains = []) => {
+const get_web_ranks_for_all_installs = async (pluginId, excludedSuffixes = [], existingDomains = new Map()) => {
 
     let fsOffset = 0
 
@@ -43,8 +42,7 @@ const get_web_ranks_for_all_installs = async (pluginId, existingDomains = []) =>
 
             // console.log("domain: " + domain)
 
-            if (existingDomains.includes(domain)) continue
-
+            if(!is_url_eligible_for_ranking(domain, excludedSuffixes, existingDomains)) continue
 
             let rank_data
 
@@ -70,9 +68,11 @@ const get_web_ranks_for_all_installs = async (pluginId, existingDomains = []) =>
                 return
             } else if (rank_data.error_code === 404) {
                 fileStream.write(domain + "," + "no rank" + EOL)
+                existingDomains.set(domain, 1)
             } else {
                 // console.log(rank_data)
                 fileStream.write(domain + "," + rank_data.rank + EOL)
+                existingDomains.set(domain, 1)
             }
         }
 
@@ -80,10 +80,32 @@ const get_web_ranks_for_all_installs = async (pluginId, existingDomains = []) =>
     }
 }
 
-async function run(pluginId, existingDomains = []) {
+function is_url_eligible_for_ranking(domain, excludedSuffixes = [], existingDomains = new Map()) {
+    if (existingDomains.has(domain)) {
+        return false
+    }
+
+    // a prod domain should contain at least 1 dot and not end with a number
+    if (!domain.includes('.')) {
+        return false
+    }
+    if (/[0-9]+$/.test(domain)) {
+        return false
+    }
+
+    for (const suffix of excludedSuffixes) {
+        if (domain.endsWith(suffix)) {
+            return false
+        }
+    }
+
+    return true
+}
+
+async function run(pluginId, excludedSuffixes = [], existingDomains = new Map()) {
 
     if (await get_sw_remaining_api_requests() > 0) {
-        await get_web_ranks_for_all_installs(pluginId, existingDomains)
+        await get_web_ranks_for_all_installs(pluginId, excludedSuffixes, existingDomains)
     } else {
         console.log("monthly SimilarWeb API limit reached")
     }
@@ -97,21 +119,29 @@ for (const pluginId of process.env.FS_API_PLUGIN_ID.split(',')) {
 
     console.log('plugin ID: ' + pluginId)
 
+    let excludedSuffixes = process.env.hasOwnProperty('FRANK_EXCLUDED_DOMAIN_SUFFIXES') ? process.env.FRANK_EXCLUDED_DOMAIN_SUFFIXES.split(',') : []
+
+    console.log('excluded domain suffixes:')
+    console.log(excludedSuffixes)
+
     if (fs.existsSync(outputFolder + '/' + outputFile)) {
 
         let file = fs.readFileSync(outputFolder + '/' + outputFile, { encoding: 'utf8', flag: 'r' })
-
-        let existingDomains = parse(file, {
+        let csvRows = parse(file, {
             delimiter: ',',
             skip_empty_lines: true,
         })
+        let existingDomains = csvRows.reduce(function(map, row) {
+            map.set(row[0], 1)
+            return map
+        }, new Map())
 
         fileStream = fs.createWriteStream(outputFolder + '/' + outputFile, { flags: 'a' })
-        await run(pluginId, existingDomains)
+        await run(pluginId, excludedSuffixes, existingDomains)
 
     } else {
         fileStream = fs.createWriteStream(outputFolder + '/' + outputFile, { flags: 'a' });
         fileStream.write("domain, rank" + EOL)
-        await run(pluginId)
+        await run(pluginId, excludedSuffixes)
     }
 }
